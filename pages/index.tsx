@@ -9,7 +9,7 @@ type State = {
 };
 
 type Event =
-  | { fileKey: string; name: "file-change" }
+  | { fileKey: string; name: "file-select" }
   | { fileKey: string; name: "chunk-read" }
   | { fileKey: string; name: "chunk-acknowledge" };
 
@@ -18,8 +18,9 @@ type Subscriber = (e: Event) => void;
 type AcknowledgeChunkError = "no-file" | "eof";
 type ReadChunkError = "no-file" | "eof" | "no-chunk";
 
-const getStore = () => {
-  const chunkSize = 1024 * 100;
+type Options = Readonly<{ chunkSize: number }>;
+
+const getStore = (options: Options) => {
   const state: State = {};
   const subscribers = new Set<Subscriber>();
   return {
@@ -39,7 +40,7 @@ const getStore = () => {
     /**
      * notify subscribers that a new file was registered so they can begin pulling chunks
      */
-    onFileChange: (e: React.ChangeEvent<HTMLInputElement>): void => {
+    onFileSelect: (e: React.ChangeEvent<HTMLInputElement>): void => {
       const file = e.target.files?.[0];
       if (!file) {
         return;
@@ -47,15 +48,15 @@ const getStore = () => {
       const fileKey = file.name + Date.now();
       state[fileKey] = {
         left: 0,
-        right: Math.min(chunkSize, file.size),
+        right: Math.min(options.chunkSize, file.size),
         file,
       };
-      subscribers.forEach((s) => s({ name: "file-change", fileKey }));
+      subscribers.forEach((s) => s({ name: "file-select", fileKey }));
     },
     /**
-     * called when sender receives an ack from the chunk recipient
+     * called when this client receives an ack from a chunk recipient
      * this will move the window to the next chunk
-     *  @throws {}
+     * @throws {AcknowledgeChunkError}
      */
     acknowledgeChunk: (fileKey: string): void => {
       const fileMeta = state[fileKey];
@@ -66,12 +67,16 @@ const getStore = () => {
         throw "eof" satisfies AcknowledgeChunkError;
       }
       fileMeta.left = fileMeta.right;
-      fileMeta.right = Math.min(fileMeta.right + chunkSize, fileMeta.file.size);
+      fileMeta.right = Math.min(
+        fileMeta.right + options.chunkSize,
+        fileMeta.file.size
+      );
       subscribers.forEach((s) => s({ fileKey, name: "chunk-acknowledge" }));
     },
     /**
      * chunks are pulled instead of pushed to not overload the udp connection
      * this way you can wait for an ack before pulling another chunk
+     * @throws {ReadChunkError}
      */
     readChunk: (fileKey: string): Promise<ArrayBuffer> => {
       return new Promise((resolve, reject) => {
@@ -99,10 +104,10 @@ const getStore = () => {
   };
 };
 
-const store = getStore();
+const store = getStore({chunkSize: 1024 * 16});
 
 const FilePicker = () => {
-  return <input type="file" onChange={store.onFileChange} />;
+  return <input type="file" onChange={store.onFileSelect} />;
 };
 
 const StoreInfo = () => {
@@ -112,9 +117,7 @@ const StoreInfo = () => {
       setEvents((prev) => [...prev, next]);
     });
   }, []);
-  return (
-    <pre>{JSON.stringify({ state: store.state, events }, null, 2)}</pre>
-  );
+  return <pre>{JSON.stringify({ state: store.state, events }, null, 2)}</pre>;
 };
 
 const withError = async <
