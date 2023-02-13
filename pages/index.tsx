@@ -1,41 +1,43 @@
 import React from "react";
 
-type FilesState = {
+type State = {
   [fileKey: string]: {
-    fileKey: string;
     left: number;
     right: number;
     file: File;
   };
 };
 
-type StoreEvent =
+type Event =
   | { fileKey: string; name: "file-change" }
-  | { fileKey: string; name: "chunk-read" };
+  | { fileKey: string; name: "chunk-read" }
+  | { fileKey: string; name: "chunk-acknowledge" };
 
-type StoreSubscriber = (e: StoreEvent) => void;
+type Subscriber = (e: Event) => void;
+
+type AcknowledgeChunkError = "no-file" | "eof";
+type ReadChunkError = "no-file" | "eof" | "no-chunk";
 
 const getStore = () => {
   const chunkSize = 1024 * 100;
-  const fileStates: FilesState = {};
-  const subs = new Set<StoreSubscriber>();
-
-  const self = {
+  const state: State = {};
+  const subscribers = new Set<Subscriber>();
+  return {
     /**
-     * events do not have a payload because subs can read from the file store
+     * events do not have a payload because subs can read the state
      */
-    fileStates,
+    state,
     /**
      * subscribers listen for new files, then start pulling chunks from them
      */
-    subscribe: (cb: StoreSubscriber) => {
-      subs.add(cb);
+    subscribe: (cb: Subscriber) => {
+      subscribers.add(cb);
       return () => {
-        subs.delete(cb);
+        subscribers.delete(cb);
       };
     },
     /**
-     * notify subs that a new file was registered so they can begin pulling chunks
+     * notify subscribers that a new file was registered so they can begin pulling chunks
      */
     onFileChange: (e: React.ChangeEvent<HTMLInputElement>): void => {
       const file = e.target.files?.[0];
@@ -43,25 +45,29 @@ const getStore = () => {
         return;
       }
       const fileKey = file.name + Date.now();
-      fileStates[fileKey] = {
-        fileKey,
+      state[fileKey] = {
         left: 0,
         right: Math.min(chunkSize, file.size),
         file,
       };
-      subs.forEach((s) => s({ name: "file-change", fileKey }));
+      subscribers.forEach((s) => s({ name: "file-change", fileKey }));
     },
     /**
      * called when sender receives an ack from the chunk recipient
      * this will move the window to the next chunk
+     *  @throws {}
      */
     acknowledgeChunk: (fileKey: string): void => {
-      const state = fileStates[fileKey];
-      if (!state) {
-        throw new Error(`acknowledgeChunk: no file at ${fileKey}`);
+      const fileMeta = state[fileKey];
+      if (!fileMeta) {
+        throw "no-file" satisfies AcknowledgeChunkError;
       }
-      state.left = state.right;
-      state.right = Math.min(state.right + chunkSize, state.file.size);
+      if (fileMeta.left === fileMeta.right) {
+        throw "eof" satisfies AcknowledgeChunkError;
+      }
+      fileMeta.left = fileMeta.right;
+      fileMeta.right = Math.min(fileMeta.right + chunkSize, fileMeta.file.size);
+      subscribers.forEach((s) => s({ fileKey, name: "chunk-acknowledge" }));
     },
     /**
      * chunks are pulled instead of pushed to not overload the udp connection
@@ -69,29 +75,28 @@ const getStore = () => {
      */
     readChunk: (fileKey: string): Promise<ArrayBuffer> => {
       return new Promise((resolve, reject) => {
-        const state = fileStates[fileKey];
-        if (!state) {
-          return reject(`readChunk: file not found for fileKey: ${fileKey}`);
+        const fileMeta = state[fileKey];
+        if (!fileMeta) {
+          return reject("no-file" satisfies ReadChunkError);
         }
-        if (state.left === state.right) {
-          return reject(
-            `readChunk: cant read empty chunk for fileKey: ${fileKey}`
-          );
+        if (fileMeta.left === fileMeta.right) {
+          return reject("eof" satisfies ReadChunkError);
         }
         const reader = new FileReader();
         reader.onload = (event) => {
           const chunk = event?.target?.result;
           if (!chunk || typeof chunk === "string") {
-            return reject(`readChunk: cant chunk for fileKey: ${fileKey}`);
+            return reject("no-chunk" satisfies ReadChunkError);
           }
           resolve(chunk);
+          subscribers.forEach((s) => s({ fileKey, name: "chunk-read" }));
         };
-        reader.readAsArrayBuffer(state.file.slice(state.left, state.right));
+        reader.readAsArrayBuffer(
+          fileMeta.file.slice(fileMeta.left, fileMeta.right)
+        );
       });
     },
   };
-
-  return self;
 };
 
 const store = getStore();
@@ -101,14 +106,44 @@ const FilePicker = () => {
 };
 
 const StoreInfo = () => {
-  const [events, setEvents] = React.useState<StoreEvent[]>([]);
+  const [events, setEvents] = React.useState<Event[]>([]);
   React.useEffect(() => {
     return store.subscribe((next) => {
       setEvents((prev) => [...prev, next]);
     });
   }, []);
   return (
-    <pre>{JSON.stringify({ store: store.fileStates, events }, null, 2)}</pre>
+    <pre>{JSON.stringify({ state: store.state, events }, null, 2)}</pre>
+  );
+};
+
+const withError = async <
+  Fn extends (...args: any) => any,
+  Args extends Parameters<Fn>
+>(
+  fn: Fn,
+  ...args: Args
+) => {
+  try {
+    await fn(...args);
+  } catch (e) {
+    alert(`${fn.name}(${[...args].join(",")}) ${e}`);
+  }
+};
+
+const UDPSocket = () => {
+  const [fileKey, setFileKey] = React.useState("");
+  return (
+    <>
+      <label>fileKey</label>
+      <input value={fileKey} onChange={(e) => setFileKey(e.target.value)} />
+      <button onClick={() => withError(store.acknowledgeChunk, fileKey)}>
+        acknowledgeChunk
+      </button>
+      <button onClick={() => withError(store.readChunk, fileKey)}>
+        readChunk
+      </button>
+    </>
   );
 };
 
@@ -116,6 +151,7 @@ export default function Home() {
   return (
     <>
       <FilePicker />
+      <UDPSocket />
       <StoreInfo />
     </>
   );
