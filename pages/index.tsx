@@ -39,6 +39,7 @@ const getStore = (options: Options) => {
     },
     /**
      * notify subscribers that a new file was registered so they can begin pulling chunks
+     * @emits file-select
      */
     onFileSelect: (e: React.ChangeEvent<HTMLInputElement>): void => {
       const file = e.target.files?.[0];
@@ -57,6 +58,7 @@ const getStore = (options: Options) => {
      * called when this client receives an ack from a chunk recipient
      * this will move the window to the next chunk
      * @throws {AcknowledgeChunkError}
+     * @emits chunk-acknowledge
      */
     acknowledgeChunk: (fileKey: string): void => {
       const fileMeta = state[fileKey];
@@ -77,6 +79,7 @@ const getStore = (options: Options) => {
      * chunks are pulled instead of pushed to not overload the udp connection
      * this way you can wait for an ack before pulling another chunk
      * @throws {ReadChunkError}
+     * @emits chunk-read
      */
     readChunk: (fileKey: string): Promise<ArrayBuffer> => {
       return new Promise((resolve, reject) => {
