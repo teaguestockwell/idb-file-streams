@@ -1,4 +1,6 @@
 import React from "react";
+import { showSaveFilePicker } from "native-file-system-adapter";
+import throttle from "lodash/throttle";
 
 type State = {
   [fileKey: string]: {
@@ -13,7 +15,7 @@ type Event =
   | { fileKey: string; name: "chunk-read" }
   | { fileKey: string; name: "chunk-acknowledge" };
 
-type Subscriber = (e: Event) => void;
+type Subscriber = (e: Event) => unknown;
 
 type AcknowledgeChunkError = "no-file" | "eof";
 type ReadChunkError = "no-file" | "eof" | "no-chunk";
@@ -104,10 +106,43 @@ const getStore = (options: Options) => {
         );
       });
     },
+    hasNextChunk: (fileKey: string): boolean => {
+      const fileMeta = state[fileKey];
+      if (!fileMeta) {
+        return false;
+      }
+      return fileMeta.left !== fileMeta.right;
+    },
   };
 };
 
-const store = getStore({chunkSize: 1024 * 16});
+const store = getStore({ chunkSize: 1024 * 16 });
+
+store.subscribe(async (e) => {
+  if (e.name !== "file-select") {
+    return;
+  }
+
+  const handle = await showSaveFilePicker({
+    _preferPolyfill: false,
+    suggestedName: e.fileKey,
+    types: [],
+  });
+
+  let errorCount = 0;
+  const writer = await handle.createWritable();
+  while (store.hasNextChunk(e.fileKey) && errorCount < 3) {
+    try {
+      const chunk = await store.readChunk(e.fileKey);
+      await writer.write(chunk);
+      store.acknowledgeChunk(e.fileKey);
+    } catch (e) {
+      errorCount++;
+      console.error(e);
+    }
+  }
+  writer.close();
+});
 
 const FilePicker = () => {
   return <input type="file" onChange={store.onFileSelect} />;
@@ -115,11 +150,12 @@ const FilePicker = () => {
 
 const StoreInfo = () => {
   const [events, setEvents] = React.useState<Event[]>([]);
-  React.useEffect(() => {
-    return store.subscribe((next) => {
-      setEvents((prev) => [...prev, next]);
-    });
-  }, []);
+  const cb = React.useRef(
+    throttle((next: Event) => {
+      setEvents((prev) => [...prev.slice(-4), next]);
+    }, 200)
+  );
+  React.useEffect(() => store.subscribe(cb.current), []);
   return <pre>{JSON.stringify({ state: store.state, events }, null, 2)}</pre>;
 };
 
@@ -153,7 +189,28 @@ const UDPSocket = () => {
   );
 };
 
+const useMITM = () => {
+  React.useEffect(() => {
+    console.log("use mitm");
+    if (!("serviceWorker" in navigator)) {
+      console.log("no sw registered");
+    }
+    navigator.serviceWorker.register("/mitm.js").then(
+      (registration) => {
+        console.log(
+          "Service Worker registration successful with scope: ",
+          registration.scope
+        );
+      },
+      (err) => {
+        console.log("Service Worker registration failed: ", err);
+      }
+    );
+  }, []);
+};
+
 export default function Home() {
+  useMITM();
   return (
     <>
       <FilePicker />
